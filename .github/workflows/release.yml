@@ -1,0 +1,81 @@
+name: release-assets
+
+on:
+  release:
+    types:
+      - published
+
+jobs:
+  upload-aar:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      JAVA_VERSION: '17'
+      ANDROID_API_LEVEL: '35'
+      ANDROID_BUILD_TOOLS: '35.0.0'
+      ANDROID_NDK_VERSION: '27.2.12479018'
+
+    steps:
+      - name: Checkout release tag
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.release.tag_name }}
+
+      - name: Set up JDK
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: ${{ env.JAVA_VERSION }}
+          cache: gradle
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android SDK and NDK packages
+        run: |
+          yes | sdkmanager --licenses || true
+          sdkmanager \
+            "platform-tools" \
+            "platforms;android-${ANDROID_API_LEVEL}" \
+            "build-tools;${ANDROID_BUILD_TOOLS}" \
+            "ndk;${ANDROID_NDK_VERSION}"
+
+      - name: Align Android environment variables
+        run: |
+          echo "ANDROID_HOME=${ANDROID_SDK_ROOT}" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK_HOME=${ANDROID_SDK_ROOT}/ndk/${ANDROID_NDK_VERSION}" >> "$GITHUB_ENV"
+
+      - name: Set up Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android,armv7-linux-androideabi
+
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            usbSerialForAndroid/native -> target
+
+      - name: Install cargo-ndk
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-ndk
+
+      - name: Verify cargo-ndk
+        run: cargo ndk --version
+
+      - name: Build release AAR
+        run: ./gradlew --stacktrace :usbSerialForAndroid:assembleRelease
+
+      - name: Prepare release asset
+        run: |
+          mkdir -p dist
+          cp usbSerialForAndroid/build/outputs/aar/usbSerialForAndroid-release.aar \
+            "dist/usb-serial-for-android-${{ github.event.release.tag_name }}.aar"
+
+      - name: Upload AAR to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.release.tag_name }}
+          files: dist/*.aar
