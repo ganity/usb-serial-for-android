@@ -97,11 +97,12 @@ public class UsbWrapper implements SerialInputOutputManager.Listener {
             ContextCompat.registerReceiver(context, usbReceiver, filter, Context.RECEIVER_NOT_EXPORTED);
             usbManager.requestPermission(serialDriver.getDevice(), permissionIntent);
             for(int i=0; i<5000; i++) {
-                if(granted[0] != null) break;
+                if(granted[0] != null || usbManager.hasPermission(serialDriver.getDevice())) break;
                 Thread.sleep(1);
             }
-            Log.d(TAG,"USB permission "+granted[0]);
-            assertTrue("USB permission dialog not confirmed", granted[0] != null && granted[0]);
+            boolean permissionGranted = granted[0] != null ? granted[0] : usbManager.hasPermission(serialDriver.getDevice());
+            Log.d(TAG,"USB permission broadcast="+granted[0]+" effective="+permissionGranted);
+            assertTrue("USB permission dialog not confirmed", permissionGranted);
         }
 
         // extract some device properties:

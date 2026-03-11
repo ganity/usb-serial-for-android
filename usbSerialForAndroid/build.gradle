@@ -3,6 +3,28 @@ plugins {
     id 'maven-publish'
 }
 
+def nativeCrateDir = file("$projectDir/native")
+def nativeJniLibsDir = file("$projectDir/src/main/jniLibs")
+def nativeAbis = ['arm64-v8a', 'armeabi-v7a']
+
+def normalizeSdkDir(candidate) {
+    if (candidate == null) {
+        return null
+    }
+    def dir = candidate instanceof File ? candidate : file(candidate)
+    if (!dir.exists()) {
+        return null
+    }
+    if (file("$dir/platforms").exists() || file("$dir/build-tools").exists()) {
+        return dir
+    }
+    def nestedSdk = file("$dir/sdk")
+    if (nestedSdk.exists() && (file("$nestedSdk/platforms").exists() || file("$nestedSdk/build-tools").exists())) {
+        return nestedSdk
+    }
+    return dir
+}
+
 android {
     compileSdkVersion 35
 
@@ -28,6 +50,73 @@ android {
             withSourcesJar()
         }
     }
+}
+
+def resolveAndroidSdkDir() {
+    def envSdk = System.getenv('ANDROID_HOME') ?: System.getenv('ANDROID_SDK_ROOT')
+    return normalizeSdkDir(envSdk)
+}
+
+def resolveAndroidNdkDir() {
+    def envNdk = System.getenv('ANDROID_NDK_HOME') ?: System.getenv('ANDROID_NDK_ROOT')
+    if (envNdk) {
+        def fromEnv = file(envNdk)
+        if (fromEnv.exists()) {
+            return fromEnv
+        }
+    }
+    def sdkDir = resolveAndroidSdkDir()
+    if (sdkDir == null) {
+        return null
+    }
+    def ndkBundle = file("$sdkDir/ndk-bundle")
+    if (ndkBundle.exists()) {
+        return ndkBundle
+    }
+    def ndkRoot = file("$sdkDir/ndk")
+    if (!ndkRoot.exists()) {
+        def siblingNdkRoot = file("${sdkDir.parent}/ndk")
+        if (!siblingNdkRoot.exists()) {
+            return null
+        }
+        ndkRoot = siblingNdkRoot
+    }
+    def versionDirs = (ndkRoot.listFiles() ?: [])
+            .findAll { it.isDirectory() }
+            .sort { a, b -> b.name <=> a.name }
+    return versionDirs ? versionDirs.first() : null
+}
+
+tasks.register('buildNativeFtdiLibs', Exec) {
+    group = 'build'
+    description = 'Build libusbserial_ftdi.so for arm64-v8a and armeabi-v7a into src/main/jniLibs.'
+    workingDir nativeCrateDir
+    inputs.file(file("$nativeCrateDir/Cargo.toml"))
+    inputs.file(file("$nativeCrateDir/Cargo.lock"))
+    inputs.dir(file("$nativeCrateDir/src"))
+    outputs.dir(nativeJniLibsDir)
+    commandLine 'cargo', 'ndk', '-t', 'arm64-v8a', '-t', 'armeabi-v7a', '-o', nativeJniLibsDir.absolutePath, 'build', '--release'
+    doFirst {
+        def sdkDir = resolveAndroidSdkDir()
+        def ndkDir = resolveAndroidNdkDir()
+        if (sdkDir == null || !sdkDir.exists()) {
+            throw new GradleException('Android SDK not found for buildNativeFtdiLibs. Set ANDROID_SDK_ROOT or ANDROID_HOME.')
+        }
+        if (ndkDir == null || !ndkDir.exists()) {
+            throw new GradleException('Android NDK not found for buildNativeFtdiLibs. Set ANDROID_NDK_HOME or install an SDK-managed NDK.')
+        }
+        nativeAbis.each { abi ->
+            delete(file("$nativeJniLibsDir/$abi/libusbserial_ftdi.so"))
+        }
+        nativeJniLibsDir.mkdirs()
+        environment 'ANDROID_HOME', sdkDir.absolutePath
+        environment 'ANDROID_SDK_ROOT', sdkDir.absolutePath
+        environment 'ANDROID_NDK_HOME', ndkDir.absolutePath
+    }
+}
+
+tasks.named('preBuild').configure {
+    dependsOn(tasks.named('buildNativeFtdiLibs'))
 }
 
 dependencies {
