@@ -68,6 +68,14 @@ jobs:
       - name: Build release AAR
         run: ./gradlew --stacktrace :usbSerialForAndroid:assembleRelease
 
+      - name: Verify native libraries in AAR
+        run: |
+          AAR=usbSerialForAndroid/build/outputs/aar/usbSerialForAndroid-release.aar
+          test -f "$AAR"
+          unzip -l "$AAR" | grep 'jni/arm64-v8a/libusbserial_ftdi.so'
+          unzip -l "$AAR" | grep 'jni/armeabi-v7a/libusbserial_ftdi.so'
+
+
       - name: Prepare release asset
         run: |
           mkdir -p dist
