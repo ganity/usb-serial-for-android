@@ -1,17 +1,15 @@
-name: build
+name: release-assets
 
 on:
-  push:
-    branches:
-      - master
-  pull_request:
-  workflow_dispatch:
+  release:
+    types:
+      - published
 
 jobs:
-  build-aar:
+  upload-aar:
     runs-on: ubuntu-latest
     permissions:
-      contents: read
+      contents: write
     env:
       JAVA_VERSION: '8'
       ANDROID_API_LEVEL: '35'
@@ -19,8 +17,10 @@ jobs:
       ANDROID_NDK_VERSION: '27.2.12479018'
 
     steps:
-      - name: Checkout source
+      - name: Checkout release tag
         uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.release.tag_name }}
 
       - name: Set up JDK
         uses: actions/setup-java@v4
@@ -49,7 +49,7 @@ jobs:
       - name: Set up Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
-          targets: aarch64-linux-android, armv7-linux-androideabi
+          targets: aarch64-linux-android,armv7-linux-androideabi
 
       - name: Cache Rust build artifacts
         uses: Swatinem/rust-cache@v2
@@ -75,9 +75,15 @@ jobs:
           unzip -l "$AAR" | grep 'jni/arm64-v8a/libusbserial_ftdi.so'
           unzip -l "$AAR" | grep 'jni/armeabi-v7a/libusbserial_ftdi.so'
 
-      - name: Upload AAR artifact
-        uses: actions/upload-artifact@v4
+
+      - name: Prepare release asset
+        run: |
+          mkdir -p dist
+          cp usbSerialForAndroid/build/outputs/aar/usbSerialForAndroid-release.aar \
+            "dist/usb-serial-for-android-${{ github.event.release.tag_name }}.aar"
+
+      - name: Upload AAR to GitHub Release
+        uses: softprops/action-gh-release@v2
         with:
-          name: usbSerialForAndroid-release-aar
-          path: usbSerialForAndroid/build/outputs/aar/usbSerialForAndroid-release.aar
-          if-no-files-found: error
+          tag_name: ${{ github.event.release.tag_name }}
+          files: dist/*.aar
