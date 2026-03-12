@@ -1,7 +1,5 @@
 package com.hoho.android.usbserial.util;
 
-import com.hoho.android.usbserial.driver.UsbSerialPort;
-
 import org.apache.commons.net.telnet.InvalidTelnetOptionException;
 import org.apache.commons.net.telnet.TelnetClient;
 import org.apache.commons.net.telnet.TelnetCommand;
@@ -11,7 +9,6 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.nio.ByteBuffer;
-import java.util.ArrayList;
 
 import static org.junit.Assert.assertEquals;
 
@@ -34,7 +31,7 @@ public class TelnetWrapper {
     private TelnetClient telnetClient;
     private InputStream readStream;
     private OutputStream writeStream;
-    private ArrayList<int[]> commandResponse = new ArrayList<>();
+    private Integer[] comPortOptionCounter = {0};
     public int writeDelay = 0;
 
     public TelnetWrapper(String host, int port) {
@@ -50,9 +47,7 @@ public class TelnetWrapper {
         telnetClient.addOptionHandler(new TelnetOptionHandler(RFC2217_COM_PORT_OPTION, false, false, false, false) {
             @Override
             public int[] answerSubnegotiation(int[] suboptionData, int suboptionLength) {
-                int[] data = new int[suboptionLength];
-                System.arraycopy(suboptionData, 0, data, 0, suboptionLength);
-                commandResponse.add(data);
+                comPortOptionCounter[0] += 1;
                 return super.answerSubnegotiation(suboptionData, suboptionLength);
             }
         });
@@ -64,25 +59,18 @@ public class TelnetWrapper {
         readStream = telnetClient.getInputStream();
     }
 
-    private int[] doCommand(String name, byte[] command) throws IOException, InterruptedException {
-        commandResponse.clear();
-        telnetClient.sendCommand((byte) TelnetCommand.SB);
-        writeStream.write(command);
-        telnetClient.sendCommand((byte)TelnetCommand.SE);
-
-        for(int i=0; i<TELNET_COMMAND_WAIT; i++) {
-            if(commandResponse.size() > 0) break;
-            Thread.sleep(1);
-        }
-        assertEquals("RFC2217 " + name+ " w/o response.", 1, commandResponse.size());
-        //Log.d(TAG, name + " -> " + Arrays.toString(commandResponse.get(0)));
-        return commandResponse.get(0);
-    }
-
     public void setUp() throws Exception {
         setUpFixtureInt();
         telnetClient.sendAYT(1000); // not correctly handled by rfc2217_server.py, but WARNING output "ignoring Telnet command: '\xf6'" is a nice separator between tests
-        doCommand("purge-data", new byte[] {RFC2217_COM_PORT_OPTION, RFC2217_PURGE_DATA, 3});
+        comPortOptionCounter[0] = 0;
+        telnetClient.sendCommand((byte)TelnetCommand.SB);
+        writeStream.write(new byte[] {RFC2217_COM_PORT_OPTION, RFC2217_PURGE_DATA, 3});
+        telnetClient.sendCommand((byte)TelnetCommand.SE);
+        for(int i=0; i<TELNET_COMMAND_WAIT; i++) {
+            if(comPortOptionCounter[0] == 1) break;
+            Thread.sleep(1);
+        }
+        assertEquals("telnet connection lost", 1, comPortOptionCounter[0].intValue());
         writeDelay = 0;
     }
 
@@ -104,15 +92,11 @@ public class TelnetWrapper {
 
     // wait full time
     public byte[] read() throws Exception {
-        return read(-1, -1);
+        return read(-1);
     }
+
     public byte[] read(int expectedLength) throws Exception {
-        return read(expectedLength, -1);
-    }
-    public byte[] read(int expectedLength, int readWait) throws Exception {
-        if(readWait == -1)
-            readWait = TELNET_READ_WAIT;
-        long end = System.currentTimeMillis() + readWait;
+        long end = System.currentTimeMillis() + TELNET_READ_WAIT;
         ByteBuffer buf = ByteBuffer.allocate(65536);
         while(System.currentTimeMillis() < end) {
             if(readStream.available() > 0) {
@@ -142,11 +126,30 @@ public class TelnetWrapper {
         }
     }
 
-    public void setParameters(int baudRate, int dataBits, int stopBits, @UsbSerialPort.Parity int parity) throws IOException, InterruptedException, InvalidTelnetOptionException {
-        doCommand("set-baudrate", new byte[] {RFC2217_COM_PORT_OPTION, RFC2217_SET_BAUDRATE, (byte)(baudRate>>24), (byte)(baudRate>>16), (byte)(baudRate>>8), (byte)baudRate});
-        doCommand("set-datasize", new byte[] {RFC2217_COM_PORT_OPTION, RFC2217_SET_DATASIZE, (byte)dataBits});
-        doCommand("set-stopsize", new byte[] {RFC2217_COM_PORT_OPTION, RFC2217_SET_STOPSIZE, (byte)stopBits});
-        doCommand("set-parity", new byte[] {RFC2217_COM_PORT_OPTION, RFC2217_SET_PARITY, (byte)(parity+1)});
-    }
+    public void setParameters(int baudRate, int dataBits, int stopBits, int parity) throws IOException, InterruptedException, InvalidTelnetOptionException {
+        comPortOptionCounter[0] = 0;
 
+        telnetClient.sendCommand((byte) TelnetCommand.SB);
+        writeStream.write(new byte[] {RFC2217_COM_PORT_OPTION, RFC2217_SET_BAUDRATE, (byte)(baudRate>>24), (byte)(baudRate>>16), (byte)(baudRate>>8), (byte)baudRate});
+        telnetClient.sendCommand((byte)TelnetCommand.SE);
+
+        telnetClient.sendCommand((byte)TelnetCommand.SB);
+        writeStream.write(new byte[] {RFC2217_COM_PORT_OPTION, RFC2217_SET_DATASIZE, (byte)dataBits});
+        telnetClient.sendCommand((byte)TelnetCommand.SE);
+
+        telnetClient.sendCommand((byte)TelnetCommand.SB);
+        writeStream.write(new byte[] {RFC2217_COM_PORT_OPTION, RFC2217_SET_STOPSIZE, (byte)stopBits});
+        telnetClient.sendCommand((byte)TelnetCommand.SE);
+
+        telnetClient.sendCommand((byte)TelnetCommand.SB);
+        writeStream.write(new byte[] {RFC2217_COM_PORT_OPTION, RFC2217_SET_PARITY, (byte)(parity+1)});
+        telnetClient.sendCommand((byte)TelnetCommand.SE);
+
+        // windows does not like nonstandard baudrates. rfc2217_server.py terminates w/o response
+        for(int i=0; i<TELNET_COMMAND_WAIT; i++) {
+            if(comPortOptionCounter[0] == 4) break;
+            Thread.sleep(1);
+        }
+        assertEquals("telnet connection lost", 4, comPortOptionCounter[0].intValue());
+    }
 }

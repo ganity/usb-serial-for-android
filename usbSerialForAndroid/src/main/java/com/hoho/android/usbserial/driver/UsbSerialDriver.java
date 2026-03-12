@@ -10,23 +10,18 @@ import android.hardware.usb.UsbDevice;
 
 import java.util.List;
 
+/**
+ *
+ * @author mike wakerly (opensource@hoho.com)
+ */
 public interface UsbSerialDriver {
-
-    /*
-     * Additional interface properties. Invoked thru reflection.
-     *
-        UsbSerialDriver(UsbDevice device);                  // constructor with device
-        static Map<Integer, int[]> getSupportedDevices();
-        static boolean probe(UsbDevice device);             // optional
-     */
-
 
     /**
      * Returns the raw {@link UsbDevice} backing this port.
      *
      * @return the device
      */
-    UsbDevice getDevice();
+    public UsbDevice getDevice();
 
     /**
      * Returns all available ports for this device. This list must have at least
@@ -34,5 +29,5 @@ public interface UsbSerialDriver {
      *
      * @return the ports
      */
-    List<UsbSerialPort> getPorts();
+    public List<UsbSerialPort> getPorts();
 }

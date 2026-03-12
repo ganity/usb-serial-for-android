@@ -8,15 +8,10 @@ package com.hoho.android.usbserial.driver;
 
 import android.hardware.usb.UsbDevice;
 import android.hardware.usb.UsbDeviceConnection;
-import android.hardware.usb.UsbEndpoint;
 import android.hardware.usb.UsbManager;
-
-import androidx.annotation.IntDef;
 
 import java.io.Closeable;
 import java.io.IOException;
-import java.lang.annotation.Retention;
-import java.lang.annotation.RetentionPolicy;
 import java.util.EnumSet;
 
 /**
@@ -27,99 +22,81 @@ import java.util.EnumSet;
 public interface UsbSerialPort extends Closeable {
 
     /** 5 data bits. */
-    int DATABITS_5 = 5;
-    /** 6 data bits. */
-    int DATABITS_6 = 6;
-    /** 7 data bits. */
-    int DATABITS_7 = 7;
-    /** 8 data bits. */
-    int DATABITS_8 = 8;
+    public static final int DATABITS_5 = 5;
 
-    /** Values for setParameters(..., parity) */
-    @Retention(RetentionPolicy.SOURCE)
-    @IntDef({PARITY_NONE, PARITY_ODD, PARITY_EVEN, PARITY_MARK, PARITY_SPACE})
-    @interface Parity {}
+    /** 6 data bits. */
+    public static final int DATABITS_6 = 6;
+
+    /** 7 data bits. */
+    public static final int DATABITS_7 = 7;
+
+    /** 8 data bits. */
+    public static final int DATABITS_8 = 8;
+
+    /** No flow control. */
+    public static final int FLOWCONTROL_NONE = 0;
+
+    /** RTS/CTS input flow control. */
+    public static final int FLOWCONTROL_RTSCTS_IN = 1;
+
+    /** RTS/CTS output flow control. */
+    public static final int FLOWCONTROL_RTSCTS_OUT = 2;
+
+    /** XON/XOFF input flow control. */
+    public static final int FLOWCONTROL_XONXOFF_IN = 4;
+
+    /** XON/XOFF output flow control. */
+    public static final int FLOWCONTROL_XONXOFF_OUT = 8;
+
     /** No parity. */
-    int PARITY_NONE = 0;
+    public static final int PARITY_NONE = 0;
+
     /** Odd parity. */
-    int PARITY_ODD = 1;
+    public static final int PARITY_ODD = 1;
+
     /** Even parity. */
-    int PARITY_EVEN = 2;
+    public static final int PARITY_EVEN = 2;
+
     /** Mark parity. */
-    int PARITY_MARK = 3;
+    public static final int PARITY_MARK = 3;
+
     /** Space parity. */
-    int PARITY_SPACE = 4;
+    public static final int PARITY_SPACE = 4;
 
     /** 1 stop bit. */
-    int STOPBITS_1 = 1;
+    public static final int STOPBITS_1 = 1;
+
     /** 1.5 stop bits. */
-    int STOPBITS_1_5 = 3;
+    public static final int STOPBITS_1_5 = 3;
+
     /** 2 stop bits. */
-    int STOPBITS_2 = 2;
+    public static final int STOPBITS_2 = 2;
 
-    /** Values for get[Supported]ControlLines() */
-    enum ControlLine { RTS, CTS, DTR, DSR, CD, RI }
-
-    /** Values for (set|get|getSupported)FlowControl() */
-    enum FlowControl { NONE, RTS_CTS, DTR_DSR, XON_XOFF, XON_XOFF_INLINE }
-
-    /** XON character used with flow control XON/XOFF */
-    char CHAR_XON = 17;
-    /** XOFF character used with flow control XON/XOFF */
-    char CHAR_XOFF = 19;
-
+    /** values for get[Supported]ControlLines() */
+    public enum ControlLine { RTS, CTS,  DTR, DSR,  CD, RI };
 
     /**
      * Returns the driver used by this port.
      */
-    UsbSerialDriver getDriver();
+    public UsbSerialDriver getDriver();
 
     /**
      * Returns the currently-bound USB device.
      */
-    UsbDevice getDevice();
+    public UsbDevice getDevice();
 
     /**
      * Port number within driver.
      */
-    int getPortNumber();
-
-    /**
-     * Returns the write endpoint.
-     * @return write endpoint
-     */
-    UsbEndpoint getWriteEndpoint();
-
-    /**
-     * Returns the read endpoint.
-     * @return read endpoint
-     */
-    UsbEndpoint getReadEndpoint();
-
+    public int getPortNumber();
+    
     /**
      * The serial number of the underlying UsbDeviceConnection, or {@code null}.
      *
      * @return value from {@link UsbDeviceConnection#getSerial()}
      * @throws SecurityException starting with target SDK 29 (Android 10) if permission for USB device is not granted
      */
-    String getSerial();
-
-    /**
-     * Applications doing permanent {@link #read} with timeout=0 can reduce data loss likelihood
-     * at high baud rate and continuous data transfer by using multiple buffers to copy next data
-     * from Linux kernel, while the current data is processed.
-     * When enabled, {@link #read} can not be called with timeout!=0 or different buffer size.
-     *
-     * @param bufferCount number of buffers to use for readQueue.
-     *                    Use 0 to disable.
-     * @param bufferSize size of each buffer.
-     *                   Use 0 for optimal size (= getReadEndpoint().getMaxPacketSize()).
-     * @throws IllegalStateException if port is open and buffer count should be lowered or
-     *                               buffer size should be changed.
-     */
-    void setReadQueue(int bufferCount, int bufferSize);
-    int getReadQueueBufferCount();
-    int getReadQueueBufferSize();
+    public String getSerial();
 
     /**
      * Opens and initializes the port. Upon success, caller must ensure that
@@ -129,14 +106,14 @@ public interface UsbSerialPort extends Closeable {
      *                   {@link UsbManager#openDevice(android.hardware.usb.UsbDevice)}
      * @throws IOException on error opening or initializing the port.
      */
-    void open(UsbDeviceConnection connection) throws IOException;
+    public void open(UsbDeviceConnection connection) throws IOException;
 
     /**
      * Closes the port and {@link UsbDeviceConnection}
      *
      * @throws IOException on error closing the port.
      */
-    void close() throws IOException;
+    public void close() throws IOException;
 
     /**
      * Reads as many bytes as possible into the destination buffer.
@@ -146,41 +123,17 @@ public interface UsbSerialPort extends Closeable {
      * @return the actual number of bytes read
      * @throws IOException if an error occurred during reading
      */
-    int read(final byte[] dest, final int timeout) throws IOException;
-
-    /**
-     * Reads bytes with specified length into the destination buffer.
-     *
-     * @param dest the destination byte buffer
-     * @param length the maximum length of the data to read
-     * @param timeout the timeout for reading in milliseconds, 0 is infinite
-     * @return the actual number of bytes read
-     * @throws IOException if an error occurred during reading
-     */
-    int read(final byte[] dest, int length, final int timeout) throws IOException;
+    public int read(final byte[] dest, final int timeout) throws IOException;
 
     /**
      * Writes as many bytes as possible from the source buffer.
      *
      * @param src the source byte buffer
      * @param timeout the timeout for writing in milliseconds, 0 is infinite
-     * @throws SerialTimeoutException if timeout reached before sending all data.
-     *                                ex.bytesTransferred may contain bytes transferred
+     * @return the actual number of bytes written
      * @throws IOException if an error occurred during writing
      */
-    void write(final byte[] src, final int timeout) throws IOException;
-
-    /**
-     * Writes bytes with specified length from the source buffer.
-     *
-     * @param src the source byte buffer
-     * @param length the length of the data to write
-     * @param timeout the timeout for writing in milliseconds, 0 is infinite
-     * @throws SerialTimeoutException if timeout reached before sending all data.
-     *                                ex.bytesTransferred may contain bytes transferred
-     * @throws IOException if an error occurred during writing
-     */
-    void write(final byte[] src, int length, final int timeout) throws IOException;
+    public int write(final byte[] src, final int timeout) throws IOException;
 
     /**
      * Sets various serial port parameters.
@@ -192,9 +145,9 @@ public interface UsbSerialPort extends Closeable {
      * @param parity one of {@link #PARITY_NONE}, {@link #PARITY_ODD},
      *               {@link #PARITY_EVEN}, {@link #PARITY_MARK}, or {@link #PARITY_SPACE}.
      * @throws IOException on error setting the port parameters
-     * @throws UnsupportedOperationException if not supported or values are not supported by a specific device
+     * @throws UnsupportedOperationException if values are not supported by a specific device
      */
-    void setParameters(int baudRate, int dataBits, int stopBits, @Parity int parity) throws IOException;
+    public void setParameters(int baudRate, int dataBits, int stopBits, int parity) throws IOException;
 
     /**
      * Gets the CD (Carrier Detect) bit from the underlying UART.
@@ -203,7 +156,7 @@ public interface UsbSerialPort extends Closeable {
      * @throws IOException if an error occurred during reading
      * @throws UnsupportedOperationException if not supported
      */
-    boolean getCD() throws IOException;
+    public boolean getCD() throws IOException;
 
     /**
      * Gets the CTS (Clear To Send) bit from the underlying UART.
@@ -212,7 +165,7 @@ public interface UsbSerialPort extends Closeable {
      * @throws IOException if an error occurred during reading
      * @throws UnsupportedOperationException if not supported
      */
-    boolean getCTS() throws IOException;
+    public boolean getCTS() throws IOException;
 
     /**
      * Gets the DSR (Data Set Ready) bit from the underlying UART.
@@ -221,7 +174,7 @@ public interface UsbSerialPort extends Closeable {
      * @throws IOException if an error occurred during reading
      * @throws UnsupportedOperationException if not supported
      */
-    boolean getDSR() throws IOException;
+    public boolean getDSR() throws IOException;
 
     /**
      * Gets the DTR (Data Terminal Ready) bit from the underlying UART.
@@ -230,7 +183,7 @@ public interface UsbSerialPort extends Closeable {
      * @throws IOException if an error occurred during reading
      * @throws UnsupportedOperationException if not supported
      */
-    boolean getDTR() throws IOException;
+    public boolean getDTR() throws IOException;
 
     /**
      * Sets the DTR (Data Terminal Ready) bit on the underlying UART, if supported.
@@ -239,7 +192,7 @@ public interface UsbSerialPort extends Closeable {
      * @throws IOException if an error occurred during writing
      * @throws UnsupportedOperationException if not supported
      */
-    void setDTR(boolean value) throws IOException;
+    public void setDTR(boolean value) throws IOException;
 
     /**
      * Gets the RI (Ring Indicator) bit from the underlying UART.
@@ -248,7 +201,7 @@ public interface UsbSerialPort extends Closeable {
      * @throws IOException if an error occurred during reading
      * @throws UnsupportedOperationException if not supported
      */
-    boolean getRI() throws IOException;
+    public boolean getRI() throws IOException;
 
     /**
      * Gets the RTS (Request To Send) bit from the underlying UART.
@@ -257,7 +210,7 @@ public interface UsbSerialPort extends Closeable {
      * @throws IOException if an error occurred during reading
      * @throws UnsupportedOperationException if not supported
      */
-    boolean getRTS() throws IOException;
+    public boolean getRTS() throws IOException;
 
     /**
      * Sets the RTS (Request To Send) bit on the underlying UART, if supported.
@@ -266,7 +219,7 @@ public interface UsbSerialPort extends Closeable {
      * @throws IOException if an error occurred during writing
      * @throws UnsupportedOperationException if not supported
      */
-    void setRTS(boolean value) throws IOException;
+    public void setRTS(boolean value) throws IOException;
 
     /**
      * Gets all control line values from the underlying UART, if supported.
@@ -274,9 +227,8 @@ public interface UsbSerialPort extends Closeable {
      *
      * @return EnumSet.contains(...) is {@code true} if set, else {@code false}
      * @throws IOException if an error occurred during reading
-     * @throws UnsupportedOperationException if not supported
      */
-    EnumSet<ControlLine> getControlLines() throws IOException;
+    public EnumSet<ControlLine> getControlLines() throws IOException;
 
     /**
      * Gets all control line supported flags.
@@ -284,37 +236,7 @@ public interface UsbSerialPort extends Closeable {
      * @return EnumSet.contains(...) is {@code true} if supported, else {@code false}
      * @throws IOException if an error occurred during reading
      */
-    EnumSet<ControlLine> getSupportedControlLines() throws IOException;
-
-    /**
-     * Set flow control mode, if supported
-     * @param flowControl @FlowControl
-     * @throws IOException if an error occurred during writing
-     * @throws UnsupportedOperationException if not supported
-     */
-    void setFlowControl(FlowControl flowControl) throws IOException;
-
-    /**
-     * Get flow control mode.
-     * @return FlowControl
-     */
-    FlowControl getFlowControl();
-
-    /**
-     * Get supported flow control modes
-     * @return EnumSet.contains(...) is {@code true} if supported, else {@code false}
-     */
-    EnumSet<FlowControl> getSupportedFlowControl();
-
-    /**
-     * If flow control = XON_XOFF, indicates that send is enabled by XON.
-     * Devices supporting flow control = XON_XOFF_INLINE return CHAR_XON/CHAR_XOFF in read() data.
-     *
-     * @return the current state
-     * @throws IOException if an error occurred during reading
-     * @throws UnsupportedOperationException if not supported
-     */
-    boolean getXON() throws IOException;
+    public EnumSet<ControlLine> getSupportedControlLines() throws IOException;
 
     /**
      * Purge non-transmitted output data and / or non-read input data.
@@ -324,18 +246,11 @@ public interface UsbSerialPort extends Closeable {
      * @throws IOException if an error occurred during flush
      * @throws UnsupportedOperationException if not supported
      */
-    void purgeHwBuffers(boolean purgeWriteBuffers, boolean purgeReadBuffers) throws IOException;
-
-    /**
-     * send BREAK condition.
-     *
-     * @param value set/reset
-     */
-    void setBreak(boolean value) throws IOException;
+    public void purgeHwBuffers(boolean purgeWriteBuffers, boolean purgeReadBuffers) throws IOException;
 
     /**
      * Returns the current state of the connection.
      */
-    boolean isOpen();
+    public boolean isOpen();
 
 }

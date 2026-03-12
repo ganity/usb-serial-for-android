@@ -19,16 +19,13 @@ package com.hoho.android.usbserial.util;
 import java.security.InvalidParameterException;
 
 /**
- * Clone of Android's /core/java/com/android/internal/util/HexDump class, for use in debugging.
- * Changes: space separated hex strings
+ * Clone of Android's HexDump class, for use in debugging. Cosmetic changes
+ * only.
  */
 public class HexDump {
     private final static char[] HEX_DIGITS = {
             '0', '1', '2', '3', '4', '5', '6', '7', '8', '9', 'A', 'B', 'C', 'D', 'E', 'F'
     };
-
-    private HexDump() {
-    }
 
     public static String dumpHexString(byte[] array) {
         return dumpHexString(array, 0, array.length);
@@ -85,12 +82,10 @@ public class HexDump {
     }
 
     public static String toHexString(byte[] array, int offset, int length) {
-        char[] buf = new char[length > 0 ? length * 3 - 1 : 0];
+        char[] buf = new char[length * 2];
 
         int bufIndex = 0;
         for (int i = offset; i < offset + length; i++) {
-            if (i > offset)
-                buf[bufIndex++] = ' ';
             byte b = array[i];
             buf[bufIndex++] = HEX_DIGITS[(b >>> 4) & 0x0F];
             buf[bufIndex++] = HEX_DIGITS[b & 0x0F];
@@ -144,13 +139,13 @@ public class HexDump {
         throw new InvalidParameterException("Invalid hex char '" + c + "'");
     }
 
-    /** accepts any separator, e.g. space or newline */
     public static byte[] hexStringToByteArray(String hexString) {
         int length = hexString.length();
-        byte[] buffer = new byte[(length + 1) / 3];
+        byte[] buffer = new byte[length / 2];
 
-        for (int i = 0; i < length; i += 3) {
-            buffer[i / 3] = (byte) ((toByte(hexString.charAt(i)) << 4) | toByte(hexString.charAt(i + 1)));
+        for (int i = 0; i < length; i += 2) {
+            buffer[i / 2] = (byte) ((toByte(hexString.charAt(i)) << 4) | toByte(hexString
+                    .charAt(i + 1)));
         }
 
         return buffer;
