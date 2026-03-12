@@ -1,3 +1,4 @@
+
 /* Copyright 2011-2013 Google Inc.
  * Copyright 2013 mike wakerly <opensource@hoho.com>
  * Copyright 2020 kai morich <mail@kai-morich.de>
@@ -9,10 +10,9 @@ package com.hoho.android.usbserial.driver;
 
 import android.hardware.usb.UsbConstants;
 import android.hardware.usb.UsbDevice;
+import android.hardware.usb.UsbDeviceConnection;
 import android.hardware.usb.UsbInterface;
 import android.util.Log;
-
-import com.hoho.android.usbserial.util.MonotonicClock;
 
 import java.io.IOException;
 import java.util.ArrayList;
@@ -20,7 +20,6 @@ import java.util.EnumSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
-
 /*
  * driver is implemented from various information scattered over FTDI documentation
  *
@@ -91,8 +90,9 @@ public class FtdiSerialDriver implements UsbSerialDriver {
         private boolean baudRateWithPort = false;
         private boolean dtr = false;
         private boolean rts = false;
-        private int breakConfig = 0;
+
         private volatile long nativeHandle = 0;
+        private int breakConfig = 0;
 
         public FtdiSerialPort(UsbDevice device, int portNumber) {
             super(device, portNumber);
@@ -103,16 +103,93 @@ public class FtdiSerialDriver implements UsbSerialDriver {
             return FtdiSerialDriver.this;
         }
 
-        boolean isUsingNativeIo() {
+
+        @Override
+        protected void openInt(UsbDeviceConnection connection) throws IOException {
+            if (!connection.claimInterface(mDevice.getInterface(mPortNumber), true)) {
+                throw new IOException("Could not claim interface " + mPortNumber);
+            }
+            if (mDevice.getInterface(mPortNumber).getEndpointCount() < 2) {
+                throw new IOException("Not enough endpoints");
+            }
+            mReadEndpoint = mDevice.getInterface(mPortNumber).getEndpoint(0);
+            mWriteEndpoint = mDevice.getInterface(mPortNumber).getEndpoint(1);
+
+            int result = mConnection.controlTransfer(REQTYPE_HOST_TO_DEVICE, RESET_REQUEST,
+                    RESET_ALL, mPortNumber + 1, null, 0, USB_WRITE_TIMEOUT_MILLIS);
+            if (result != 0) {
+                throw new IOException("Reset failed: result=" + result);
+            }
+            result = mConnection.controlTransfer(REQTYPE_HOST_TO_DEVICE, MODEM_CONTROL_REQUEST,
+                    (dtr ? MODEM_CONTROL_DTR_ENABLE : MODEM_CONTROL_DTR_DISABLE) |
+                            (rts ? MODEM_CONTROL_RTS_ENABLE : MODEM_CONTROL_RTS_DISABLE),
+                    mPortNumber + 1, null, 0, USB_WRITE_TIMEOUT_MILLIS);
+            if (result != 0) {
+                throw new IOException("Init RTS,DTR failed: result=" + result);
+            }
+
+            setFlowControlNone();
+
+            // mDevice.getVersion() would require API 23
+            byte[] rawDescriptors = connection.getRawDescriptors();
+            if (rawDescriptors == null || rawDescriptors.length < 14) {
+                throw new IOException("Could not get device descriptors");
+            }
+            int deviceType = rawDescriptors[13];
+            baudRateWithPort = deviceType == 7 || deviceType == 8 || deviceType == 9; // ...H devices
+
+            nativeHandle = openNativeSession(rawDescriptors);
+            Log.i(TAG, "FTDI port " + mPortNumber + " open complete: mode=" + (nativeHandle != 0 ? "native" : "java-fallback"));
+        }
+
+        @Override
+        protected void closeInt() {
+            closeNativeSession();
+            try {
+                mConnection.releaseInterface(mDevice.getInterface(mPortNumber));
+            } catch(Exception ignored) {}
+        }
+
+        @Override
+        protected int readFilter(byte[] buffer, int totalBytesRead) throws IOException {
+            final int maxPacketSize = mReadEndpoint.getMaxPacketSize();
+            int destPos = 0;
+            for(int srcPos = 0; srcPos < totalBytesRead; srcPos += maxPacketSize) {
+                int length = Math.min(srcPos + maxPacketSize, totalBytesRead) - (srcPos + READ_HEADER_LENGTH);
+                if (length < 0)
+                    throw new IOException("Expected at least " + READ_HEADER_LENGTH + " bytes");
+                System.arraycopy(buffer, srcPos + READ_HEADER_LENGTH, buffer, destPos, length);
+                destPos += length;
+            }
+            return destPos;
+        }
+
+
+        private boolean isUsingNativeIo() {
             return nativeHandle != 0;
         }
 
-        private long openNativeSession(byte[] rawDescriptors) {
-            int readQueueBufferCount = getReadQueueBufferCount();
-            if (readQueueBufferCount != 0) {
-                Log.i(TAG, "FTDI port " + mPortNumber + " mode=java-fallback reason=readQueueBufferCount=" + readQueueBufferCount);
-                return 0;
+        private String ioModeTag() {
+            return isUsingNativeIo() ? "native" : "java-fallback";
+        }
+
+        private void logIoSelection(String operation) {
+            Log.i(TAG, "FTDI port " + mPortNumber + " op=" + operation + " mode=" + ioModeTag());
+        }
+
+        private void logIoSelection(String operation, String detail) {
+            Log.i(TAG, "FTDI port " + mPortNumber + " op=" + operation + " mode=" + ioModeTag() + " " + detail);
+        }
+
+        private <T> T runNativeIo(NativeIoOperation<T> operation) throws IOException {
+            long handle = nativeHandle;
+            if (handle == 0) {
+                throw new IOException("Connection closed");
             }
+            return operation.run(handle);
+        }
+
+        private long openNativeSession(byte[] rawDescriptors) {
             if (!FtdiNativeBridge.isAvailable()) {
                 Log.i(TAG, "FTDI port " + mPortNumber + " mode=java-fallback reason=native bridge unavailable (" + FtdiNativeBridge.getAvailabilityMessage() + ")");
                 return 0;
@@ -131,7 +208,7 @@ public class FtdiSerialDriver implements UsbSerialDriver {
                         baudRateWithPort,
                         dtr,
                         rts,
-                        mFlowControl.ordinal());
+                        0 /* flowControlOrdinal: NONE */);
                 if (handle != 0) {
                     Log.i(TAG, "FTDI port " + mPortNumber + " mode=native");
                 }
@@ -156,199 +233,82 @@ public class FtdiSerialDriver implements UsbSerialDriver {
             }
         }
 
-        private <T> T runNativeIo(NativeIoOperation<T> operation) throws IOException {
-            testConnection(false);
-            long handle = nativeHandle;
-            if (handle == 0) {
-                throw new IOException("Connection closed");
-            }
-            try {
-                return operation.run(handle);
-            } catch (IOException e) {
-                if (!isOpen()) {
-                    throw new IOException("Connection closed");
-                }
-                throw e;
-            }
-        }
-
-        int nativeWriteRequest(long handle, byte[] src, int length, int timeout) throws IOException {
-            return FtdiNativeBridge.write(handle, src, length, timeout);
-        }
-
-
         @Override
-        protected void openInt() throws IOException {
-            if (!mConnection.claimInterface(mDevice.getInterface(mPortNumber), true)) {
-                throw new IOException("Could not claim interface " + mPortNumber);
-            }
-            if (mDevice.getInterface(mPortNumber).getEndpointCount() < 2) {
-                throw new IOException("Not enough endpoints");
-            }
-            mReadEndpoint = mDevice.getInterface(mPortNumber).getEndpoint(0);
-            mWriteEndpoint = mDevice.getInterface(mPortNumber).getEndpoint(1);
-
-            int result = mConnection.controlTransfer(REQTYPE_HOST_TO_DEVICE, RESET_REQUEST,
-                    RESET_ALL, mPortNumber+1, null, 0, USB_WRITE_TIMEOUT_MILLIS);
-            if (result != 0) {
-                throw new IOException("Reset failed: result=" + result);
-            }
-            result = mConnection.controlTransfer(REQTYPE_HOST_TO_DEVICE, MODEM_CONTROL_REQUEST,
-                    (dtr ? MODEM_CONTROL_DTR_ENABLE : MODEM_CONTROL_DTR_DISABLE) |
-                            (rts ? MODEM_CONTROL_RTS_ENABLE : MODEM_CONTROL_RTS_DISABLE),
-                    mPortNumber+1, null, 0, USB_WRITE_TIMEOUT_MILLIS);
-            if (result != 0) {
-                throw new IOException("Init RTS,DTR failed: result=" + result);
-            }
-            setFlowControl(mFlowControl);
-
-            // mDevice.getVersion() would require API 23
-            byte[] rawDescriptors = mConnection.getRawDescriptors();
-            if(rawDescriptors == null || rawDescriptors.length < 14) {
-                throw new IOException("Could not get device descriptors");
-            }
-            int deviceType = rawDescriptors[13];
-            baudRateWithPort = deviceType == 7 || deviceType == 8 || deviceType == 9 // ...H devices
-                    || mDevice.getInterfaceCount() > 1; // FT2232C
-            nativeHandle = openNativeSession(rawDescriptors);
-            Log.i(TAG, "FTDI port " + mPortNumber + " open complete: mode=" + (nativeHandle != 0 ? "native" : "java-fallback"));
-        }
-
-        @Override
-        protected void closeInt() {
-            closeNativeSession();
-            try {
-                mConnection.releaseInterface(mDevice.getInterface(mPortNumber));
-            } catch(Exception ignored) {}
-        }
-
-        @Override
-        public int read(final byte[] dest, final int timeout) throws IOException
-        {
-            if(dest.length <= READ_HEADER_LENGTH) {
-                throw new IllegalArgumentException("Read buffer too small");
-                // could allocate larger buffer, including space for 2 header bytes, but this would
-                // result in buffers not being 64 byte aligned any more, causing data loss at continuous
-                // data transfer at high baud rates when buffers are fully filled.
-            }
-            return read(dest, dest.length, timeout);
-        }
-
-        @Override
-        public int read(final byte[] dest, int length, final int timeout) throws IOException {
-            if(length <= READ_HEADER_LENGTH) {
-                throw new IllegalArgumentException("Read length too small");
-                // could allocate larger buffer, including space for 2 header bytes, but this would
-                // result in buffers not being 64 byte aligned any more, causing data loss at continuous
-                // data transfer at high baud rates when buffers are fully filled.
-            }
-            length = Math.min(length, dest.length);
-            if (isUsingNativeIo()) {
-                final int readLength = length;
-                return runNativeIo(handle -> FtdiNativeBridge.read(handle, dest, readLength, timeout));
-            }
-            int nread;
-            if (timeout != 0) {
-                long endTime = MonotonicClock.millis() + timeout;
-                do {
-                    nread = super.read(dest, length, Math.max(1, (int)(endTime - MonotonicClock.millis())), false);
-                } while (nread == READ_HEADER_LENGTH && MonotonicClock.millis() < endTime);
-                if(nread <= 0)
-                    testConnection(MonotonicClock.millis() < endTime);
-            } else {
-                do {
-                    nread = super.read(dest, length, timeout);
-                } while (nread == READ_HEADER_LENGTH);
-            }
-            return readFilter(dest, nread);
-        }
-
-        @Override
-        public void write(byte[] src, int timeout) throws IOException {
-            write(src, src.length, timeout);
-        }
-
-        @Override
-        public void write(final byte[] src, int length, final int timeout) throws IOException {
-            length = Math.min(length, src.length);
+        public int read(byte[] dest, int timeout) throws IOException {
             if (!isUsingNativeIo()) {
-                super.write(src, length, timeout);
+                logIoSelection("read", "timeout=" + timeout + " len=" + dest.length);
+                return super.read(dest, timeout);
+            }
+            if (dest.length <= READ_HEADER_LENGTH) {
+                throw new IllegalArgumentException("Read buffer too small");
+            }
+            logIoSelection("read", "timeout=" + timeout + " len=" + dest.length);
+            return runNativeIo(handle -> FtdiNativeBridge.read(handle, dest, dest.length, timeout));
+        }
+
+        @Override
+        public int write(byte[] src, int timeout) throws IOException {
+            if (!isUsingNativeIo()) {
+                logIoSelection("write", "timeout=" + timeout + " len=" + src.length);
+                return super.write(src, timeout);
+            }
+            logIoSelection("write", "timeout=" + timeout + " len=" + src.length);
+            return runNativeIo(handle -> FtdiNativeBridge.write(handle, src, src.length, timeout));
+        }
+
+        private void setFlowControlNone() throws IOException {
+            if (isUsingNativeIo()) {
+                runNativeIo(handle -> {
+                    FtdiNativeBridge.setFlowControl(handle, 0, 0, 0);
+                    return null;
+                });
                 return;
             }
-            int offset = 0;
-            long startTime = MonotonicClock.millis();
-
-            testConnection(false);
-            while (offset < length) {
-                int requestTimeout;
-                final int requestLength;
-                final int actualLength;
-
-                synchronized (mWriteBufferLock) {
-                    final byte[] writeBuffer;
-
-                    if (mWriteBuffer == null) {
-                        mWriteBuffer = new byte[mWriteEndpoint.getMaxPacketSize()];
-                    }
-                    requestLength = Math.min(length - offset, mWriteBuffer.length);
-                    if (offset == 0) {
-                        writeBuffer = src;
-                    } else {
-                        System.arraycopy(src, offset, mWriteBuffer, 0, requestLength);
-                        writeBuffer = mWriteBuffer;
-                    }
-                    if (timeout == 0 || offset == 0) {
-                        requestTimeout = timeout;
-                    } else {
-                        requestTimeout = (int) (startTime + timeout - MonotonicClock.millis());
-                        if (requestTimeout == 0) {
-                            requestTimeout = -1;
-                        }
-                    }
-                    if (requestTimeout < 0) {
-                        actualLength = -2;
-                    } else {
-                        final byte[] finalWriteBuffer = writeBuffer;
-                        final int finalRequestTimeout = requestTimeout;
-                        actualLength = runNativeIo(handle -> nativeWriteRequest(handle, finalWriteBuffer, requestLength, finalRequestTimeout));
-                    }
-                }
-                long elapsed = MonotonicClock.millis() - startTime;
-                int resultCode = actualLength;
-                if (resultCode == 0 && timeout != 0) {
-                    resultCode = -1;
-                }
-                if (resultCode <= 0) {
-                    String msg = "Error writing " + requestLength + " bytes at offset " + offset + " of total " + src.length + " after " + elapsed + "msec, rc=" + resultCode;
-                    if (timeout != 0) {
-                        testConnection(elapsed < timeout, msg);
-                        throw new SerialTimeoutException(msg, offset);
-                    } else {
-                        throw new IOException(msg);
-                    }
-                }
-                offset += resultCode;
+            int result = mConnection.controlTransfer(REQTYPE_HOST_TO_DEVICE, SET_FLOW_CONTROL_REQUEST,
+                    0, mPortNumber + 1, null, 0, USB_WRITE_TIMEOUT_MILLIS);
+            if (result != 0) {
+                throw new IOException("Setting flow control failed: result=" + result);
             }
         }
 
-        protected int readFilter(byte[] buffer, int totalBytesRead) throws IOException {
-            final int maxPacketSize = mReadEndpoint.getMaxPacketSize();
-            int destPos = 0;
-            for(int srcPos = 0; srcPos < totalBytesRead; srcPos += maxPacketSize) {
-                int length = Math.min(srcPos + maxPacketSize, totalBytesRead) - (srcPos + READ_HEADER_LENGTH);
-                if (length < 0)
-                    throw new IOException("Expected at least " + READ_HEADER_LENGTH + " bytes");
-                System.arraycopy(buffer, srcPos + READ_HEADER_LENGTH, buffer, destPos, length);
-                destPos += length;
+        private int getStatus() throws IOException {
+            logIoSelection("getStatus");
+            if (isUsingNativeIo()) {
+                return runNativeIo(FtdiNativeBridge::getStatus);
             }
-            //Log.d(TAG, "read filter " + totalBytesRead + " -> " + destPos);
-            return destPos;
+            byte[] data = new byte[2];
+            int result = mConnection.controlTransfer(REQTYPE_DEVICE_TO_HOST, GET_MODEM_STATUS_REQUEST,
+                    0, mPortNumber + 1, data, data.length, USB_WRITE_TIMEOUT_MILLIS);
+            if (result != 2) {
+                throw new IOException("Get modem status failed: result=" + result);
+            }
+            return data[0];
         }
+
+        @Override
+        public void setDTR(boolean value) throws IOException {
+            logIoSelection("setDTR", "value=" + value);
+            if (isUsingNativeIo()) {
+                runNativeIo(handle -> {
+                    FtdiNativeBridge.setDtr(handle, value);
+                    return null;
+                });
+                dtr = value;
+                return;
+            }
+            int result = mConnection.controlTransfer(REQTYPE_HOST_TO_DEVICE, MODEM_CONTROL_REQUEST,
+                    value ? MODEM_CONTROL_DTR_ENABLE : MODEM_CONTROL_DTR_DISABLE, mPortNumber + 1, null, 0, USB_WRITE_TIMEOUT_MILLIS);
+            if (result != 0) {
+                throw new IOException("Set DTR failed: result=" + result);
+            }
+            dtr = value;
+        }
+
 
         private void setBaudrate(int baudRate) throws IOException {
             int divisor, subdivisor, effectiveBaudRate;
             if (baudRate > 3500000) {
-                throw new UnsupportedOperationException("Baud rate to high");
+                throw new IOException("Baud rate to high");
             } else if(baudRate >= 2500000) {
                 divisor = 0;
                 subdivisor = 0;
@@ -363,13 +323,13 @@ public class FtdiSerialDriver implements UsbSerialDriver {
                 subdivisor = divisor & 0x07;
                 divisor >>= 3;
                 if (divisor > 0x3fff) // exceeds bit 13 at 183 baud
-                    throw new UnsupportedOperationException("Baud rate to low");
+                    throw new IOException("Baud rate to low");
                 effectiveBaudRate = (24000000 << 1) / ((divisor << 3) + subdivisor);
                 effectiveBaudRate = (effectiveBaudRate +1) >> 1;
             }
             double baudRateError = Math.abs(1.0 - (effectiveBaudRate / (double)baudRate));
             if(baudRateError >= 0.031) // can happen only > 1.5Mbaud
-                throw new UnsupportedOperationException(String.format("Baud rate deviation %.1f%% is higher than allowed 3%%", baudRateError*100));
+                throw new IOException(String.format("baud rate deviation %.1f%% is higher than allowed 3%%", baudRateError*100));
             int value = divisor;
             int index = 0;
             switch(subdivisor) {
@@ -397,11 +357,29 @@ public class FtdiSerialDriver implements UsbSerialDriver {
         }
 
         @Override
-        public void setParameters(int baudRate, int dataBits, int stopBits, @Parity int parity) throws IOException {
-            if(baudRate <= 0) {
-                throw new IllegalArgumentException("Invalid baud rate: " + baudRate);
+        public void setParameters(int baudRate, int dataBits, int stopBits, int parity) throws IOException {
+            int config = buildLineCodingConfig(dataBits, stopBits, parity);
+            logIoSelection("setParameters", "baudRate=" + baudRate + " dataBits=" + dataBits + " stopBits=" + stopBits + " parity=" + parity + " config=0x" + Integer.toHexString(config));
+            if (isUsingNativeIo()) {
+                final int finalConfig = config;
+                runNativeIo(handle -> {
+                    FtdiNativeBridge.setParameters(handle, baudRate, finalConfig);
+                    return null;
+                });
+            } else {
+                setBaudrate(baudRate);
+                int result = mConnection.controlTransfer(REQTYPE_HOST_TO_DEVICE, SET_DATA_REQUEST,
+                        config, mPortNumber + 1, null, 0, USB_WRITE_TIMEOUT_MILLIS);
+                if (result != 0) {
+                    throw new IOException("Setting parameters failed: result=" + result);
+                }
             }
+            breakConfig = config & 0x0fff;
+        }
 
+
+
+        private int buildLineCodingConfig(int dataBits, int stopBits, int parity) {
             int config = 0;
             switch (dataBits) {
                 case DATABITS_5:
@@ -445,39 +423,9 @@ public class FtdiSerialDriver implements UsbSerialDriver {
                 default:
                     throw new IllegalArgumentException("Invalid stop bits: " + stopBits);
             }
-
-            if (isUsingNativeIo()) {
-                final int finalConfig = config;
-                runNativeIo(handle -> {
-                    FtdiNativeBridge.setParameters(handle, baudRate, finalConfig);
-                    return null;
-                });
-                breakConfig = config;
-                return;
-            }
-
-            setBaudrate(baudRate);
-
-            int result = mConnection.controlTransfer(REQTYPE_HOST_TO_DEVICE, SET_DATA_REQUEST,
-                    config, mPortNumber+1,null, 0, USB_WRITE_TIMEOUT_MILLIS);
-            if (result != 0) {
-                throw new IOException("Setting parameters failed: result=" + result);
-            }
-            breakConfig = config;
+            return config;
         }
 
-        private int getStatus() throws IOException {
-            if (isUsingNativeIo()) {
-                return runNativeIo(FtdiNativeBridge::getStatus);
-            }
-            byte[] data = new byte[2];
-            int result = mConnection.controlTransfer(REQTYPE_DEVICE_TO_HOST, GET_MODEM_STATUS_REQUEST,
-                    0, mPortNumber+1, data, data.length, USB_WRITE_TIMEOUT_MILLIS);
-            if (result != data.length) {
-                throw new IOException("Get modem status failed: result=" + result);
-            }
-            return data[0];
-        }
 
         @Override
         public boolean getCD() throws IOException {
@@ -499,23 +447,6 @@ public class FtdiSerialDriver implements UsbSerialDriver {
             return dtr;
         }
 
-        @Override
-        public void setDTR(boolean value) throws IOException {
-            if (isUsingNativeIo()) {
-                runNativeIo(handle -> {
-                    FtdiNativeBridge.setDtr(handle, value);
-                    return null;
-                });
-                dtr = value;
-                return;
-            }
-            int result = mConnection.controlTransfer(REQTYPE_HOST_TO_DEVICE, MODEM_CONTROL_REQUEST,
-                    value ? MODEM_CONTROL_DTR_ENABLE : MODEM_CONTROL_DTR_DISABLE, mPortNumber+1, null, 0, USB_WRITE_TIMEOUT_MILLIS);
-            if (result != 0) {
-                throw new IOException("Set DTR failed: result=" + result);
-            }
-            dtr = value;
-        }
 
         @Override
         public boolean getRI() throws IOException {
@@ -529,6 +460,7 @@ public class FtdiSerialDriver implements UsbSerialDriver {
 
         @Override
         public void setRTS(boolean value) throws IOException {
+            logIoSelection("setRTS", "value=" + value);
             if (isUsingNativeIo()) {
                 runNativeIo(handle -> {
                     FtdiNativeBridge.setRts(handle, value);
@@ -538,9 +470,9 @@ public class FtdiSerialDriver implements UsbSerialDriver {
                 return;
             }
             int result = mConnection.controlTransfer(REQTYPE_HOST_TO_DEVICE, MODEM_CONTROL_REQUEST,
-                    value ? MODEM_CONTROL_RTS_ENABLE : MODEM_CONTROL_RTS_DISABLE, mPortNumber+1, null, 0, USB_WRITE_TIMEOUT_MILLIS);
+                    value ? MODEM_CONTROL_RTS_ENABLE : MODEM_CONTROL_RTS_DISABLE, mPortNumber + 1, null, 0, USB_WRITE_TIMEOUT_MILLIS);
             if (result != 0) {
-                throw new IOException("Set DTR failed: result=" + result);
+                throw new IOException("Set RTS failed: result=" + result);
             }
             rts = value;
         }
@@ -549,12 +481,12 @@ public class FtdiSerialDriver implements UsbSerialDriver {
         public EnumSet<ControlLine> getControlLines() throws IOException {
             int status = getStatus();
             EnumSet<ControlLine> set = EnumSet.noneOf(ControlLine.class);
-            if(rts) set.add(ControlLine.RTS);
-            if((status & MODEM_STATUS_CTS) != 0) set.add(ControlLine.CTS);
-            if(dtr) set.add(ControlLine.DTR);
-            if((status & MODEM_STATUS_DSR) != 0) set.add(ControlLine.DSR);
-            if((status & MODEM_STATUS_CD) != 0) set.add(ControlLine.CD);
-            if((status & MODEM_STATUS_RI) != 0) set.add(ControlLine.RI);
+            if (rts) set.add(ControlLine.RTS);
+            if ((status & MODEM_STATUS_CTS) != 0) set.add(ControlLine.CTS);
+            if (dtr) set.add(ControlLine.DTR);
+            if ((status & MODEM_STATUS_DSR) != 0) set.add(ControlLine.DSR);
+            if ((status & MODEM_STATUS_CD) != 0) set.add(ControlLine.CD);
+            if ((status & MODEM_STATUS_RI) != 0) set.add(ControlLine.RI);
             return set;
         }
 
@@ -564,55 +496,8 @@ public class FtdiSerialDriver implements UsbSerialDriver {
         }
 
         @Override
-        public void setFlowControl(FlowControl flowControl) throws IOException {
-            if (isUsingNativeIo()) {
-                switch (flowControl) {
-                    case NONE:
-                    case RTS_CTS:
-                    case DTR_DSR:
-                    case XON_XOFF_INLINE:
-                        runNativeIo(handle -> {
-                            FtdiNativeBridge.setFlowControl(handle, flowControl.ordinal(), CHAR_XON, CHAR_XOFF);
-                            return null;
-                        });
-                        break;
-                    default:
-                        throw new UnsupportedOperationException();
-                }
-            } else {
-                int value = 0;
-                int index = mPortNumber+1;
-                switch (flowControl) {
-                    case NONE:
-                        break;
-                    case RTS_CTS:
-                        index |= 0x100;
-                        break;
-                    case DTR_DSR:
-                        index |= 0x200;
-                        break;
-                    case XON_XOFF_INLINE:
-                        value = CHAR_XON + (CHAR_XOFF << 8);
-                        index |= 0x400;
-                        break;
-                    default:
-                        throw new UnsupportedOperationException();
-                }
-                int result = mConnection.controlTransfer(REQTYPE_HOST_TO_DEVICE, SET_FLOW_CONTROL_REQUEST,
-                        value, index, null, 0, USB_WRITE_TIMEOUT_MILLIS);
-                if (result != 0)
-                    throw new IOException("Set flow control failed: result=" + result);
-            }
-            mFlowControl = flowControl;
-        }
-
-        @Override
-        public EnumSet<FlowControl> getSupportedFlowControl() {
-            return EnumSet.of(FlowControl.NONE, FlowControl.RTS_CTS, FlowControl.DTR_DSR, FlowControl.XON_XOFF_INLINE);
-        }
-
-        @Override
         public void purgeHwBuffers(boolean purgeWriteBuffers, boolean purgeReadBuffers) throws IOException {
+            logIoSelection("purgeHwBuffers", "purgeWrite=" + purgeWriteBuffers + " purgeRead=" + purgeReadBuffers);
             if (isUsingNativeIo()) {
                 runNativeIo(handle -> {
                     FtdiNativeBridge.purgeHwBuffers(handle, purgeWriteBuffers, purgeReadBuffers);
@@ -622,41 +507,23 @@ public class FtdiSerialDriver implements UsbSerialDriver {
             }
             if (purgeWriteBuffers) {
                 int result = mConnection.controlTransfer(REQTYPE_HOST_TO_DEVICE, RESET_REQUEST,
-                        RESET_PURGE_RX, mPortNumber+1, null, 0, USB_WRITE_TIMEOUT_MILLIS);
+                        RESET_PURGE_RX, mPortNumber + 1, null, 0, USB_WRITE_TIMEOUT_MILLIS);
                 if (result != 0) {
-                    throw new IOException("Purge write buffer failed: result=" + result);
+                    throw new IOException("purge write buffer failed: result=" + result);
                 }
             }
 
             if (purgeReadBuffers) {
                 int result = mConnection.controlTransfer(REQTYPE_HOST_TO_DEVICE, RESET_REQUEST,
-                        RESET_PURGE_TX, mPortNumber+1, null, 0, USB_WRITE_TIMEOUT_MILLIS);
+                        RESET_PURGE_TX, mPortNumber + 1, null, 0, USB_WRITE_TIMEOUT_MILLIS);
                 if (result != 0) {
-                    throw new IOException("Purge read buffer failed: result=" + result);
+                    throw new IOException("purge read buffer failed: result=" + result);
                 }
             }
         }
 
-        @Override
-        public void setBreak(boolean value) throws IOException {
-            int config = breakConfig;
-            if(value) config |= 0x4000;
-            if (isUsingNativeIo()) {
-                int finalConfig = config;
-                runNativeIo(handle -> {
-                    FtdiNativeBridge.setBreak(handle, finalConfig);
-                    return null;
-                });
-                return;
-            }
-            int result = mConnection.controlTransfer(REQTYPE_HOST_TO_DEVICE, SET_DATA_REQUEST,
-                    config, mPortNumber+1,null, 0, USB_WRITE_TIMEOUT_MILLIS);
-            if (result != 0) {
-                throw new IOException("Setting BREAK failed: result=" + result);
-            }
-        }
-
         public void setLatencyTimer(int latencyTime) throws IOException {
+            logIoSelection("setLatencyTimer", "latencyTime=" + latencyTime);
             if (isUsingNativeIo()) {
                 runNativeIo(handle -> {
                     FtdiNativeBridge.setLatencyTimer(handle, latencyTime);
@@ -665,37 +532,61 @@ public class FtdiSerialDriver implements UsbSerialDriver {
                 return;
             }
             int result = mConnection.controlTransfer(REQTYPE_HOST_TO_DEVICE, SET_LATENCY_TIMER_REQUEST,
-                    latencyTime, mPortNumber+1, null, 0, USB_WRITE_TIMEOUT_MILLIS);
+                    latencyTime, mPortNumber + 1, null, 0, USB_WRITE_TIMEOUT_MILLIS);
             if (result != 0) {
                 throw new IOException("Set latency timer failed: result=" + result);
             }
         }
 
         public int getLatencyTimer() throws IOException {
+            logIoSelection("getLatencyTimer");
             if (isUsingNativeIo()) {
                 return runNativeIo(FtdiNativeBridge::getLatencyTimer);
             }
             byte[] data = new byte[1];
             int result = mConnection.controlTransfer(REQTYPE_DEVICE_TO_HOST, GET_LATENCY_TIMER_REQUEST,
-                    0, mPortNumber+1, data, data.length, USB_WRITE_TIMEOUT_MILLIS);
-            if (result != data.length) {
+                    0, mPortNumber + 1, data, data.length, USB_WRITE_TIMEOUT_MILLIS);
+            if (result != 1) {
                 throw new IOException("Get latency timer failed: result=" + result);
             }
             return data[0];
         }
 
+        public void setBreak(boolean enabled) throws IOException {
+            int config = breakConfig & ~0x4000;
+            if (enabled) {
+                config |= 0x4000;
+            }
+            logIoSelection("setBreak", "enabled=" + enabled + " config=0x" + Integer.toHexString(config));
+            if (isUsingNativeIo()) {
+                final int finalConfig = config;
+                runNativeIo(handle -> {
+                    FtdiNativeBridge.setBreak(handle, finalConfig);
+                    return null;
+                });
+                breakConfig = config;
+                return;
+            }
+            int result = mConnection.controlTransfer(REQTYPE_HOST_TO_DEVICE, SET_DATA_REQUEST,
+                    config, mPortNumber + 1, null, 0, USB_WRITE_TIMEOUT_MILLIS);
+            if (result != 0) {
+                throw new IOException("Setting break failed: result=" + result);
+            }
+            breakConfig = config;
+        }
+
+
+
     }
 
-    @SuppressWarnings({"unused"})
     public static Map<Integer, int[]> getSupportedDevices() {
-        final Map<Integer, int[]> supportedDevices = new LinkedHashMap<>();
+        final Map<Integer, int[]> supportedDevices = new LinkedHashMap<Integer, int[]>();
         supportedDevices.put(UsbId.VENDOR_FTDI,
                 new int[] {
                     UsbId.FTDI_FT232R,
                     UsbId.FTDI_FT232H,
                     UsbId.FTDI_FT2232H,
                     UsbId.FTDI_FT4232H,
-                    UsbId.FTDI_FT231X,  // same ID for FT230X, FT231X, FT234XD
                 });
         return supportedDevices;
     }

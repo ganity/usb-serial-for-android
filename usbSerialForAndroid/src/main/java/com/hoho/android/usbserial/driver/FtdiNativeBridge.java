@@ -4,10 +4,17 @@ import android.util.Log;
 
 import java.io.IOException;
 
+/**
+ * Internal JNI bridge for native FTDI I/O acceleration.
+ *
+ * <p>Designed to be optional: if the native library is missing or cannot be loaded,
+ * callers should fall back to the existing Java implementation.</p>
+ */
 final class FtdiNativeBridge {
 
     static final int RESULT_UNSUPPORTED = Integer.MIN_VALUE;
     static final int RESULT_INVALID_ARGUMENT = Integer.MIN_VALUE + 1;
+    static final int RESULT_CLOSED = Integer.MIN_VALUE + 2;
 
     private static final String TAG = FtdiNativeBridge.class.getSimpleName();
     private static final String LIB_NAME = "usbserial_ftdi";
@@ -157,6 +164,8 @@ final class FtdiNativeBridge {
                 throw new UnsupportedOperationException(operation + " not supported");
             case RESULT_INVALID_ARGUMENT:
                 throw new IllegalArgumentException(operation + " invalid argument");
+            case RESULT_CLOSED:
+                throw new IOException(operation + " failed: connection closed");
             default:
                 throw new IOException(operation + " failed: result=" + result);
         }
@@ -215,3 +224,4 @@ final class FtdiNativeBridge {
 
     private static native int nativeGetLatencyTimer(long handle);
 }
+

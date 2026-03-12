@@ -1,90 +1,22 @@
-plugins {
-    id 'com.android.library'
-    id 'maven-publish'
-}
+apply plugin: 'com.android.library'
+
+// Build native FTDI acceleration library (libusbserial_ftdi.so) on every build.
+// Requires ANDROID_NDK_HOME (or ANDROID_NDK_ROOT) to be set.
 
 def nativeCrateDir = file("$projectDir/native")
 def nativeJniLibsDir = file("$projectDir/src/main/jniLibs")
 def nativeAbis = ['arm64-v8a', 'armeabi-v7a']
 
-def normalizeSdkDir(candidate) {
-    if (candidate == null) {
-        return null
-    }
-    def dir = candidate instanceof File ? candidate : file(candidate)
-    if (!dir.exists()) {
-        return null
-    }
-    if (file("$dir/platforms").exists() || file("$dir/build-tools").exists()) {
-        return dir
-    }
-    def nestedSdk = file("$dir/sdk")
-    if (nestedSdk.exists() && (file("$nestedSdk/platforms").exists() || file("$nestedSdk/build-tools").exists())) {
-        return nestedSdk
-    }
-    return dir
-}
-
-android {
-    compileSdkVersion 35
-
-    defaultConfig {
-        minSdkVersion 17
-        targetSdkVersion 35
-        consumerProguardFiles 'proguard-rules.pro'
-        
-        testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
-        testInstrumentationRunnerArguments = [                    // Raspi   Windows   LinuxVM   ...
-                'rfc2217_server_host': '192.168.0.78',
-                'rfc2217_server_nonstandard_baudrates': 'true',   // true    false     false
-        ]
-    }
-    compileOptions {
-        sourceCompatibility JavaVersion.VERSION_1_8
-        targetCompatibility JavaVersion.VERSION_1_8
-    }
-    namespace 'com.hoho.android.usbserial'
-    publishing {
-        // if coverage is enabled, change 'release' to 'anyDeviceRelease' or comment out publishing rule
-        singleVariant('release') {
-            withSourcesJar()
-        }
-    }
-}
-
-def resolveAndroidSdkDir() {
-    def envSdk = System.getenv('ANDROID_HOME') ?: System.getenv('ANDROID_SDK_ROOT')
-    return normalizeSdkDir(envSdk)
-}
-
 def resolveAndroidNdkDir() {
     def envNdk = System.getenv('ANDROID_NDK_HOME') ?: System.getenv('ANDROID_NDK_ROOT')
-    if (envNdk) {
-        def fromEnv = file(envNdk)
-        if (fromEnv.exists()) {
-            return fromEnv
-        }
-    }
-    def sdkDir = resolveAndroidSdkDir()
-    if (sdkDir == null) {
+    if (!envNdk) {
         return null
     }
-    def ndkBundle = file("$sdkDir/ndk-bundle")
-    if (ndkBundle.exists()) {
-        return ndkBundle
+    def dir = file(envNdk)
+    if (dir.exists()) {
+        return dir
     }
-    def ndkRoot = file("$sdkDir/ndk")
-    if (!ndkRoot.exists()) {
-        def siblingNdkRoot = file("${sdkDir.parent}/ndk")
-        if (!siblingNdkRoot.exists()) {
-            return null
-        }
-        ndkRoot = siblingNdkRoot
-    }
-    def versionDirs = (ndkRoot.listFiles() ?: [])
-            .findAll { it.isDirectory() }
-            .sort { a, b -> b.name <=> a.name }
-    return versionDirs ? versionDirs.first() : null
+    return null
 }
 
 tasks.register('buildNativeFtdiLibs', Exec) {
@@ -92,58 +24,106 @@ tasks.register('buildNativeFtdiLibs', Exec) {
     description = 'Build libusbserial_ftdi.so for arm64-v8a and armeabi-v7a into src/main/jniLibs.'
     workingDir nativeCrateDir
     inputs.file(file("$nativeCrateDir/Cargo.toml"))
-    inputs.file(file("$nativeCrateDir/Cargo.lock"))
     inputs.dir(file("$nativeCrateDir/src"))
     outputs.dir(nativeJniLibsDir)
+
     commandLine 'cargo', 'ndk', '-t', 'arm64-v8a', '-t', 'armeabi-v7a', '-o', nativeJniLibsDir.absolutePath, 'build', '--release'
+
     doFirst {
-        def sdkDir = resolveAndroidSdkDir()
         def ndkDir = resolveAndroidNdkDir()
-        if (sdkDir == null || !sdkDir.exists()) {
-            throw new GradleException('Android SDK not found for buildNativeFtdiLibs. Set ANDROID_SDK_ROOT or ANDROID_HOME.')
-        }
         if (ndkDir == null || !ndkDir.exists()) {
-            throw new GradleException('Android NDK not found for buildNativeFtdiLibs. Set ANDROID_NDK_HOME or install an SDK-managed NDK.')
+            throw new GradleException('Android NDK not found. Set ANDROID_NDK_HOME (or ANDROID_NDK_ROOT).')
         }
         nativeAbis.each { abi ->
             delete(file("$nativeJniLibsDir/$abi/libusbserial_ftdi.so"))
         }
         nativeJniLibsDir.mkdirs()
-        environment 'ANDROID_HOME', sdkDir.absolutePath
-        environment 'ANDROID_SDK_ROOT', sdkDir.absolutePath
         environment 'ANDROID_NDK_HOME', ndkDir.absolutePath
     }
 }
 
+
+// Ensure native libs are built for all Android builds.
 tasks.named('preBuild').configure {
     dependsOn(tasks.named('buildNativeFtdiLibs'))
 }
 
-dependencies {
-    implementation "androidx.annotation:annotation:1.9.1"
-    testImplementation 'junit:junit:4.13.2'
-    testImplementation 'org.mockito:mockito-core:5.15.2'
-    androidTestImplementation 'androidx.appcompat:appcompat:1.6.1' // later versions have minsdk 21
-    androidTestImplementation 'androidx.test:core:1.5.0' // later versions have minsdk 19
-    androidTestImplementation 'androidx.test:runner:1.5.2' // later versions have minsdk 19
-    androidTestImplementation 'commons-net:commons-net:3.9.0' // later versions fail on old Android devices with missing java.time.Duration class
-    androidTestImplementation 'org.apache.commons:commons-lang3:3.14.0'
-}
-
-// gradle task: publishToMavenLocal
-project.afterEvaluate {
-    publishing {
-        publications {
-            release(MavenPublication) {
-                from components.release
-
-                // values used for local maven repo, jitpack uses github release:
-                groupId 'com.github.mik3y'
-                artifactId 'usb-serial-for-android'
-                version '3.9.1beta'
-            }
+android {
+    sourceSets {
+        main {
+            jniLibs.srcDirs = ['src/main/jniLibs']
         }
     }
 }
+
+
+// Bypass typedef/annotation extraction tasks to avoid network fetch of lint dependencies
+
+// Ensure typedef recipe files exist early, as AGP validates them during task configuration.
+// In some environments these files are missing when annotation/typedef tasks are disabled.
+['debug','release'].each { variant ->
+    def typedefFile = file("$projectDir/build/intermediates/annotations_typedef_file/${variant}/typedefs.txt")
+    if (!typedefFile.exists()) {
+        typedefFile.parentFile.mkdirs()
+        typedefFile.text = ''
+    }
+}
+
+// in constrained environments. This keeps the project buildable for local/native development.
+afterEvaluate {
+    tasks.matching { it.name == 'extractDebugAnnotations' || it.name == 'extractReleaseAnnotations' }.configureEach {
+        enabled = false
+    }
+
+    // Work around missing typedef generation in some environments. The typedef recipe file
+    // is only needed for annotation typedef extraction and can be absent when those tasks
+    // are disabled.
+    tasks.matching { it.name == 'syncDebugLibJars' || it.name == 'syncReleaseLibJars' }.configureEach {
+        doFirst {
+            def typedefFile = file("$buildDir/intermediates/annotations_typedef_file/${it.name.contains('Debug') ? 'debug' : 'release'}/typedefs.txt")
+            if (!typedefFile.exists()) {
+                typedefFile.parentFile.mkdirs()
+                typedefFile.text = ''
+            }
+        }
+    }
+
+    // Also disable typedef file generation/extraction tasks if present.
+    tasks.matching { it.name.toLowerCase().contains('typedef') }.configureEach {
+        enabled = false
+    }
+
+}
+
+android {
+    compileSdkVersion 29
+    buildToolsVersion '29.0.3'
+
+    defaultConfig {
+        minSdkVersion 17
+        targetSdkVersion 28
+        consumerProguardFiles 'proguard-rules.pro'
+
+        testInstrumentationRunner "android.support.test.runner.AndroidJUnitRunner"
+        testInstrumentationRunnerArguments = [                    // Raspi   Windows   LinuxVM   ...
+                'rfc2217_server_host': '192.168.0.100',
+                'rfc2217_server_nonstandard_baudrates': 'true',   // true    false     false
+        ]
+    }
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_1_8
+        targetCompatibility JavaVersion.VERSION_1_8
+    }
+}
+
+dependencies {
+    testImplementation 'junit:junit:4.13'
+    androidTestImplementation 'com.android.support:support-annotations:28.0.0'
+    androidTestImplementation 'com.android.support.test:runner:1.0.2'
+    androidTestImplementation 'commons-net:commons-net:3.6'
+    androidTestImplementation 'org.apache.commons:commons-lang3:3.8.1' // starting with 3.9 requires min-api 26
+}
+
+//apply from: 'publishToMavenLocal.gradle'
 
 //apply from: 'coverage.gradle'

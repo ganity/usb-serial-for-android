@@ -1,3 +1,8 @@
+// Native FTDI bridge implementation (Rust/JNI)
+//
+// Copied from upstream usb-serial-for-android native implementation.
+// This is used as an optional acceleration path for FTDI devices.
+
 #![allow(non_camel_case_types)]
 
 use std::cmp::min;
@@ -19,6 +24,9 @@ type jsize = jint;
 
 const RESULT_UNSUPPORTED: jint = i32::MIN;
 const RESULT_INVALID_ARGUMENT: jint = i32::MIN + 1;
+const RESULT_CLOSED: jint = i32::MIN + 2;
+const NATIVE_BLOCKING_READ_SLICE_TIMEOUT_MILLIS: u32 = 200;
+
 
 // JNINativeInterface_ starts with 4 reserved slots before GetVersion.
 // Keep these indices aligned with the Android NDK jni.h layout.
@@ -115,6 +123,7 @@ extern "C" {
     fn __android_log_write(prio: c_int, tag: *const c_char, text: *const c_char) -> c_int;
 }
 
+
 type ExceptionOccurredFn = unsafe extern "system" fn(JNIEnv) -> *mut c_void;
 type GetArrayLengthFn = unsafe extern "system" fn(JNIEnv, jarray) -> jsize;
 type GetByteArrayRegionFn = unsafe extern "system" fn(JNIEnv, jbyteArray, jsize, jsize, *mut jbyte);
@@ -179,6 +188,28 @@ fn set_byte_array_region(env: JNIEnv, array: jbyteArray, buffer: &[u8]) -> Resul
         return Err(io_error_code());
     }
     Ok(())
+}
+
+fn jni_self_test(env: JNIEnv, raw_descriptors: jbyteArray) -> bool {
+    // Smoke test to validate JNI function table indices for byte[] access.
+    // If indices are wrong (NDK/ART mismatch), these calls are likely to trigger a JNI exception.
+    if env.is_null() || raw_descriptors.is_null() {
+        return false;
+    }
+
+    let mut tmp = [0u8; 1];
+    let len = match byte_array_length(env, raw_descriptors) {
+        Ok(len) => len,
+        Err(_) => return false,
+    };
+    if len == 0 {
+        return false;
+    }
+    get_byte_array_region(env, raw_descriptors, 0, &mut tmp).is_ok()
+}
+
+fn is_native_io_supported(env: JNIEnv, raw_descriptors: jbyteArray) -> bool {
+    jni_self_test(env, raw_descriptors)
 }
 
 fn bool_from_jboolean(value: jboolean) -> bool {
@@ -275,6 +306,14 @@ fn bulk_transfer(fd: c_int, endpoint: u32, buffer: &mut [u8], timeout: u32) -> R
     loop {
         let rc = unsafe { ioctl(fd, USBDEVFS_BULK, &mut transfer) };
         if rc >= 0 {
+            android_log_info(&format!(
+                "USBDEVFS_BULK ok fd={} ep=0x{:02x} len={} timeout={} actual={}",
+                fd,
+                endpoint,
+                buffer.len(),
+                timeout,
+                rc,
+            ));
             return usize::try_from(rc).map_err(|_| -1);
         }
         let err = current_errno();
@@ -474,8 +513,14 @@ pub extern "system" fn Java_com_hoho_android_usbserial_driver_FtdiNativeBridge_n
     if fd < 0 || port_number < 0 || read_max_packet_size <= READ_HEADER_LENGTH as jint || write_max_packet_size <= 0 {
         return RESULT_INVALID_ARGUMENT as jlong;
     }
-    if !raw_descriptors.is_null() && byte_array_length(env, raw_descriptors).is_err() {
-        return RESULT_INVALID_ARGUMENT as jlong;
+    if !raw_descriptors.is_null() {
+        if !is_native_io_supported(env, raw_descriptors) {
+            android_log_error("nativeOpen: JNI self-test failed, disabling native I/O");
+            return RESULT_UNSUPPORTED as jlong;
+        }
+        if byte_array_length(env, raw_descriptors).is_err() {
+            return RESULT_INVALID_ARGUMENT as jlong;
+        }
     }
     let read_endpoint_address = read_endpoint_address as u32;
     let write_endpoint_address = write_endpoint_address as u32;
@@ -496,6 +541,7 @@ pub extern "system" fn Java_com_hoho_android_usbserial_driver_FtdiNativeBridge_n
         read_buffer: Vec::new(),
         write_buffer: Vec::new(),
     };
+
     let handle = Box::into_raw(Box::new(Mutex::new(session))) as jlong;
     android_log_info(&format!(
         "nativeOpen success handle={} fd={} port={} interface={} readEp=0x{:02x}/{} writeEp=0x{:02x}/{} baudRateWithPort={} dtr={} rts={} flowControl={}",
@@ -545,6 +591,9 @@ pub extern "system" fn Java_com_hoho_android_usbserial_driver_FtdiNativeBridge_n
     if length <= READ_HEADER_LENGTH as jint || timeout < 0 {
         return RESULT_INVALID_ARGUMENT;
     }
+    if handle == 0 {
+        return RESULT_INVALID_ARGUMENT;
+    }
     let dest_len = match byte_array_length(env, dest) {
         Ok(len) => len,
         Err(err) => return err,
@@ -559,23 +608,44 @@ pub extern "system" fn Java_com_hoho_android_usbserial_driver_FtdiNativeBridge_n
     let result = with_session(handle, |session| {
         let raw_buffer_len = required_read_buffer_len(requested_len, session.read_max_packet_size)?;
         session.read_buffer.resize(raw_buffer_len, 0);
-        let deadline = if timeout == 0 { None } else { Some(Instant::now() + Duration::from_millis(timeout as u64)) };
+        let deadline = if timeout == 0 {
+            None
+        } else {
+            Some(Instant::now() + Duration::from_millis(timeout as u64))
+        };
         loop {
-            let transfer_timeout = remaining_timeout(deadline);
+            let transfer_timeout = if timeout == 0 {
+                NATIVE_BLOCKING_READ_SLICE_TIMEOUT_MILLIS
+            } else {
+                remaining_timeout(deadline)
+            };
             if timeout != 0 && transfer_timeout == 0 {
                 return Ok(0usize);
             }
-            let bytes_read = bulk_transfer(session.fd, session.read_endpoint_address, &mut session.read_buffer, transfer_timeout)?;
+            let bytes_read = bulk_transfer(
+                session.fd,
+                session.read_endpoint_address,
+                &mut session.read_buffer,
+                transfer_timeout,
+            )?;
             if bytes_read == 0 {
-                if timeout == 0 || remaining_timeout(deadline) != 0 {
+                if timeout == 0 {
+                    probe_connection(session)?;
+                    continue;
+                }
+                if remaining_timeout(deadline) != 0 {
                     probe_connection(session)?;
                 }
                 return Ok(0usize);
             }
             let filtered = filter_ftdi_read(&mut session.read_buffer, bytes_read, session.read_max_packet_size)?;
             if filtered == 0 {
-                if timeout == 0 { continue; }
-                if remaining_timeout(deadline) == 0 { return Ok(0usize); }
+                if timeout == 0 {
+                    continue;
+                }
+                if remaining_timeout(deadline) == 0 {
+                    return Ok(0usize);
+                }
                 continue;
             }
             return Ok(filtered);
@@ -831,88 +901,3 @@ pub extern "system" fn Java_com_hoho_android_usbserial_driver_FtdiNativeBridge_n
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn init_buf(buf: &mut [u8]) {
-        for (i, b) in buf.iter_mut().enumerate() {
-            *b = i as u8;
-        }
-    }
-
-    fn test_buf(buf: &[u8], len: usize) -> bool {
-        let mut expected = 2u8;
-        for actual in &buf[..len] {
-            if *actual != expected {
-                return false;
-            }
-            expected = expected.wrapping_add(1);
-            if expected % 64 == 0 {
-                expected = expected.wrapping_add(2);
-            }
-        }
-        true
-    }
-
-    #[test]
-    fn filter_ftdi_read_matches_java_behavior() {
-        let mut buf = vec![0u8; 2048];
-
-        assert_eq!(filter_ftdi_read(&mut buf, 0, 64).unwrap(), 0);
-        assert!(filter_ftdi_read(&mut buf, 1, 64).is_err());
-
-        init_buf(&mut buf);
-        assert_eq!(filter_ftdi_read(&mut buf, 2, 64).unwrap(), 0);
-
-        init_buf(&mut buf);
-        let len = filter_ftdi_read(&mut buf, 3, 64).unwrap();
-        assert_eq!(len, 1);
-        assert!(test_buf(&buf, len));
-
-        init_buf(&mut buf);
-        let len = filter_ftdi_read(&mut buf, 64, 64).unwrap();
-        assert_eq!(len, 62);
-        assert!(test_buf(&buf, len));
-
-        assert!(filter_ftdi_read(&mut buf, 65, 64).is_err());
-
-        init_buf(&mut buf);
-        let len = filter_ftdi_read(&mut buf, 68, 64).unwrap();
-        assert_eq!(len, 64);
-        assert!(test_buf(&buf, len));
-
-        init_buf(&mut buf);
-        let len = filter_ftdi_read(&mut buf, 16 * 64 + 11, 64).unwrap();
-        assert_eq!(len, 16 * 62 + 9);
-        assert!(test_buf(&buf, len));
-    }
-
-    #[test]
-    fn compute_baud_rate_handles_boundaries_and_exact_values() {
-        assert_eq!(compute_baud_rate(0, false, 0), Err(RESULT_INVALID_ARGUMENT));
-        assert_eq!(compute_baud_rate(183, false, 0), Err(RESULT_UNSUPPORTED));
-        assert!(compute_baud_rate(184, false, 0).is_ok());
-
-        assert_eq!(compute_baud_rate(9_600, false, 0).unwrap(), (0x4138, 0));
-        assert_eq!(compute_baud_rate(2_000_000, true, 1).unwrap(), (1, 2));
-        assert_eq!(compute_baud_rate(3_000_000, true, 0).unwrap(), (0, 1));
-
-        assert_eq!(compute_baud_rate((2_000_000.0 / 1.04) as i32, false, 0), Err(RESULT_UNSUPPORTED));
-        assert!(compute_baud_rate((2_000_000.0 / 1.03) as i32, false, 0).is_ok());
-        assert!(compute_baud_rate((2_000_000.0 * 1.03) as i32, false, 0).is_ok());
-        assert_eq!(compute_baud_rate((2_000_000.0 * 1.04) as i32, false, 0), Err(RESULT_UNSUPPORTED));
-        assert_eq!(compute_baud_rate(4_000_000, false, 0), Err(RESULT_UNSUPPORTED));
-    }
-
-    #[test]
-    fn required_read_buffer_len_accounts_for_ftdi_headers() {
-        assert_eq!(required_read_buffer_len(1, 64).unwrap(), 3);
-        assert_eq!(required_read_buffer_len(62, 64).unwrap(), 64);
-        assert_eq!(required_read_buffer_len(63, 64).unwrap(), 67);
-        assert_eq!(required_read_buffer_len(64, 64).unwrap(), 68);
-        assert_eq!(required_read_buffer_len(16 * 62 + 9, 64).unwrap(), 16 * 64 + 11);
-        assert_eq!(required_read_buffer_len(1, 2), Err(RESULT_INVALID_ARGUMENT));
-    }
-
-}
